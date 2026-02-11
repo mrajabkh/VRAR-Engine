@@ -1,4 +1,8 @@
 # Tiny 3D Renderer (with outlines) augmented with perspective projection
+import time
+from pathlib import Path
+
+import cv2
 import numpy as np
 
 
@@ -17,13 +21,13 @@ def triangle(t, v0, v1, v2, intensity):
     # Barycentric coordinates for each pixel
     B = np.dot(t, np.vstack((P, np.ones((1, P.shape[1]), dtype=int))))
 
-    # Keep pixels inside the triangle (α,β,γ >= 0)
+    # Keep pixels inside the triangle (a,b,g >= 0)
     I = np.argwhere(np.all(B >= 0, axis=0))
     X, Y = P[0, I], P[1, I]
     Z = v0[2]*B[0, I] + v1[2]*B[1, I] + v2[2]*B[2, I]
 
     # Z-buffer test (keep closest)
-    I = np.argwhere(zbuffer[Y, X] < Z)[:, 0]
+    I = np.argwhere(zbuffer[Y, X] > Z)[:, 0]
     X, Y, Z = X[I], Y[I], Z[I]
     zbuffer[Y, X] = Z
     image[Y, X] = intensity, intensity, intensity, 255
@@ -33,16 +37,35 @@ def triangle(t, v0, v1, v2, intensity):
     Pedge.extend(line(v0, v1))
     Pedge.extend(line(v1, v2))
     Pedge.extend(line(v2, v0))
+
+    if len(Pedge) == 0:
+        return
+
     Pedge = np.array(Pedge).T  # shape (2, n)
+
+    # Clip outline points to valid screen indices
+    Xall = Pedge[0].astype(int)
+    Yall = Pedge[1].astype(int)
+
+    mask = (
+        (Xall >= 0) & (Xall < image.shape[1]) &
+        (Yall >= 0) & (Yall < image.shape[0])
+    )
+
+    if not np.any(mask):
+        return
+
+    Pedge = np.vstack((Xall[mask], Yall[mask]))
 
     B = np.dot(t, np.vstack((Pedge, np.ones((1, Pedge.shape[1]), dtype=int))))
     I = np.argwhere(np.all(B >= 0, axis=0))
     X, Y = Pedge[0, I], Pedge[1, I]
     Z = v0[2]*B[0, I] + v1[2]*B[1, I] + v2[2]*B[2, I]
 
-    I = np.argwhere(zbuffer[Y, X] <= Z)[:, 0]
+    I = np.argwhere(zbuffer[Y, X] >= Z)[:, 0]
     X, Y = X[I], Y[I]
     image[Y, X] = 0, 0, 0, 255
+
 
 
 def line(A, B):
@@ -135,36 +158,16 @@ def viewport(x, y, w, h, d):
     ], dtype=float)
 
 
-if __name__ == '__main__':
-    import time
-    import PIL.Image
-
-    width, height = 1200, 1200
-
-    light  = np.array([0, 0, -1], dtype=float)  # directional light
-    eye    = np.array([-1.5, 1, 2], dtype=float)
-    center = np.array([0, 0, 0], dtype=float)
-    up     = np.array([0, 1, 0], dtype=float)
-
-    image = np.zeros((height, width, 4), dtype=np.uint8)
-    zbuffer = -1e18 * np.ones((height, width), dtype=float)  # very far away
-
-    # coords[0] = x grid, coords[1] = y grid
-    coords = np.mgrid[0:width, 0:height].astype(int)
-
-    V, Vi = obj_load("bunny.obj")
-
-    # Centering and scaling the model roughly into view
+def _prep_model_into_view(V, scale=1.25):
+    # Same centering/scaling logic as your original main
     vmin, vmax = V.min(), V.max()
-    V = (2 * (V - vmin) / (vmax - vmin) - 1) * 1.25
+    V = (2 * (V - vmin) / (vmax - vmin) - 1) * scale
     V[:, 0] -= (V[:, 0].min() + V[:, 0].max()) / 2
     V[:, 1] -= (V[:, 1].min() + V[:, 1].max()) / 2
+    return V
 
-    # Matrices
-    vp_mat  = viewport(32, 32, width - 64, height - 64, 1000)
-    view    = lookat(eye, center, up)
-    proj    = perspective(fov_deg=60, aspect=width/height, near=0.1, far=100.0)
 
+def render_model(V, Vi, view, proj, vp_mat, light):
     # Object vertices to homogeneous
     Vh = np.c_[V, np.ones(len(V))]  # (N,4)
 
@@ -199,11 +202,71 @@ if __name__ == '__main__':
     # Light dot normal -> intensity
     I = np.dot(N, light) * 255
 
-    start = time.time()
     for i in np.argwhere(I >= 0)[:, 0]:
         vs0, vs1, vs2 = Vs_tri[i]
         triangle(T[i], vs0, vs1, vs2, I[i])
-    end = time.time()
 
-    print("Rendering time:", end - start)
-    PIL.Image.fromarray(image[::-1, :, :]).save("bunny.png")
+
+if __name__ == "__main__":
+    width, height = 1200, 1200
+
+    light  = np.array([0, 0, -1], dtype=float)  # directional light
+    eye    = np.array([-1.5, 1, 2], dtype=float)
+    center = np.array([0, 0, 0], dtype=float)
+    up     = np.array([0, 1, 0], dtype=float)
+
+    image = np.zeros((height, width, 4), dtype=np.uint8)
+    zbuffer = 1e18 * np.ones((height, width), dtype=float)  # very far away
+
+    # coords[0] = x grid, coords[1] = y grid
+    coords = np.mgrid[0:width, 0:height].astype(int)
+
+    # Robust OBJ paths (so running from VSCode doesn't break relative paths)
+    here = Path(__file__).resolve().parent
+    V_bunny, Vi_bunny = obj_load(str(here / "bunny.obj"))
+    V_floor, Vi_floor = obj_load(str(here / "floor.obj"))
+
+    # Centering and scaling the models roughly into view (same as your original)
+    V_bunny = _prep_model_into_view(V_bunny, scale=1)
+    V_floor = _prep_model_into_view(V_floor, scale=1.25)
+    V_bunny /= 2
+    V_floor[:, 1] -= 1.2
+    V_floor *= 2
+
+
+
+    # Matrices
+    vp_mat  = viewport(32, 32, width - 64, height - 64, 1000)
+    view    = lookat(eye, center, up)
+    proj    = perspective(fov_deg=60, aspect=width/height, near=0.1, far=100.0)
+
+    cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
+
+    while True:
+        start = time.time()
+
+        # Clear each frame
+        image[:] = 0
+        zbuffer[:] = 1e18
+
+        # Draw multiple models into the same framebuffer/zbuffer
+        render_model(V_floor, Vi_floor, view, proj, vp_mat, light)
+        render_model(V_bunny, Vi_bunny, view, proj, vp_mat, light)
+
+        end = time.time()
+        cv2.setWindowTitle("Framebuffer", "Framebuffer | Frame time: %.3fs" % (end - start))
+
+        # Display: flip vertically like your original save (image[::-1, ...])
+        # Convert RGBA -> BGRA for OpenCV display
+        frame = image[::-1, :, :][:, :, [2, 1, 0, 3]]
+        cv2.imshow("Framebuffer", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27 or key == ord("q"):
+            break
+
+        # If user closes the window, exit
+        if cv2.getWindowProperty("Framebuffer", cv2.WND_PROP_VISIBLE) < 1:
+            break
+
+    cv2.destroyAllWindows()
