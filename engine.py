@@ -19,7 +19,7 @@ def triangle(t, v0, v1, v2, intensity):
 
     I = np.argwhere(np.all(B >= 0, axis=0))
     X, Y = P[0, I], P[1, I]
-    Z = v0[2]*B[0, I] + v1[2]*B[1, I] + v2[2]*B[2, I]
+    Z = v0[2] * B[0, I] + v1[2] * B[1, I] + v2[2] * B[2, I]
 
     # Z-buffer (smaller Z = closer)
     I = np.argwhere(zbuffer[Y, X] > Z)[:, 0]
@@ -53,7 +53,7 @@ def triangle(t, v0, v1, v2, intensity):
     B = np.dot(t, np.vstack((Pedge, np.ones((1, Pedge.shape[1]), dtype=int))))
     I = np.argwhere(np.all(B >= 0, axis=0))
     X, Y = Pedge[0, I], Pedge[1, I]
-    Z = v0[2]*B[0, I] + v1[2]*B[1, I] + v2[2]*B[2, I]
+    Z = v0[2] * B[0, I] + v1[2] * B[1, I] + v2[2] * B[2, I]
 
     I = np.argwhere(zbuffer[Y, X] >= Z)[:, 0]
     X, Y = X[I], Y[I]
@@ -114,7 +114,7 @@ def lookat(eye, center, up):
     M[2, :3] = -f
     M[0, 3] = -np.dot(s, eye)
     M[1, 3] = -np.dot(u, eye)
-    M[2, 3] =  np.dot(f, eye)
+    M[2, 3] = np.dot(f, eye)
     return M
 
 
@@ -131,10 +131,10 @@ def perspective(fov_deg, aspect, near, far):
 
 def viewport(x, y, w, h, d):
     return np.array([
-        [w/2,   0,    0, x + w/2],
-        [0,   h/2,    0, y + h/2],
-        [0,     0,  d/2,     d/2],
-        [0,     0,    0,       1]
+        [w / 2, 0, 0, x + w / 2],
+        [0, h / 2, 0, y + h / 2],
+        [0, 0, d / 2, d / 2],
+        [0, 0, 0, 1]
     ], dtype=float)
 
 
@@ -146,9 +146,112 @@ def prep_model(V, scale=1.25):
     return V
 
 
-def render_model(V, Vi, view, proj, vp_mat, light):
+# -----------------------------
+# Transformation matrices (Part 3)
+# -----------------------------
+def mat_translate(tx, ty, tz):
+    M = np.eye(4, dtype=float)
+    M[0, 3] = tx
+    M[1, 3] = ty
+    M[2, 3] = tz
+    return M
+
+
+def mat_scale(sx, sy, sz):
+    M = np.eye(4, dtype=float)
+    M[0, 0] = sx
+    M[1, 1] = sy
+    M[2, 2] = sz
+    return M
+
+
+def mat_rot_x(a):
+    c, s = np.cos(a), np.sin(a)
+    M = np.eye(4, dtype=float)
+    M[1, 1] = c
+    M[1, 2] = -s
+    M[2, 1] = s
+    M[2, 2] = c
+    return M
+
+
+def mat_rot_y(a):
+    c, s = np.cos(a), np.sin(a)
+    M = np.eye(4, dtype=float)
+    M[0, 0] = c
+    M[0, 2] = s
+    M[2, 0] = -s
+    M[2, 2] = c
+    return M
+
+
+def mat_rot_z(a):
+    c, s = np.cos(a), np.sin(a)
+    M = np.eye(4, dtype=float)
+    M[0, 0] = c
+    M[0, 1] = -s
+    M[1, 0] = s
+    M[1, 1] = c
+    return M
+
+
+def load_imu_csv(path):
+    """
+    Loads the IMU CSV dataset and converts gyroscope
+    readings from deg/s to rad/s.
+
+    Returns:
+        t        : (N,) time in seconds
+        gyro_rad : (N,3) angular velocity in rad/s
+        accel    : (N,3) acceleration in m/s^2
+        mag      : (N,3) magnetometer in Gauss
+    """
+
+    data = np.genfromtxt(
+        path,
+        delimiter=",",
+        skip_header=1
+    )
+
+    # Columns based on your layout
+    t = data[:, 0]
+
+    gyro_deg = data[:, 1:4]
+    accel = data[:, 4:7]
+    mag = data[:, 7:10]
+
+    # Convert deg/s → rad/s
+    gyro_rad = np.deg2rad(gyro_deg)
+
+    return t, gyro_rad, accel, mag
+
+
+class Model:
+    def __init__(self, V, Vi, name=""):
+        self.name = name
+        self.V = V
+        self.Vi = Vi
+        self.pos = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.rot = np.array([0.0, 0.0, 0.0], dtype=float)   # radians: rx, ry, rz
+        self.scl = np.array([1.0, 1.0, 1.0], dtype=float)
+
+    def model_matrix(self):
+        T = mat_translate(self.pos[0], self.pos[1], self.pos[2])
+        Rx = mat_rot_x(self.rot[0])
+        Ry = mat_rot_y(self.rot[1])
+        Rz = mat_rot_z(self.rot[2])
+        S = mat_scale(self.scl[0], self.scl[1], self.scl[2])
+        return T @ Rz @ Ry @ Rx @ S
+
+
+def render_model(model, view, proj, vp_mat, light):
+    V = model.V
+    Vi = model.Vi
+
     Vh = np.c_[V, np.ones(len(V))]
-    V_cam_h = Vh @ view.T
+    V_world_h = Vh @ model.model_matrix().T
+
+    V_cam_h = V_world_h @ view.T
     V_cam = V_cam_h[:, :3]
 
     clip = V_cam_h @ proj.T
@@ -174,6 +277,14 @@ def render_model(V, Vi, view, proj, vp_mat, light):
 
 
 if __name__ == "__main__":
+
+    t, gyro, accel, mag = load_imu_csv("IMUData.csv")
+
+    print("Number of samples:", len(t))
+    print("Gyro shape:", gyro.shape)
+    print("Accel shape:", accel.shape)
+    print("Mag shape:", mag.shape)
+
     width, height = 1200, 1200
 
     light = np.array([0, 0, -1], dtype=float)
@@ -187,29 +298,40 @@ if __name__ == "__main__":
     V_bunny, Vi_bunny = obj_load(str(here / "bunny.obj"))
     V_floor, Vi_floor = obj_load(str(here / "floor.obj"))
 
-    # Your model prep (keep it simple)
-    V_bunny = prep_model(V_bunny, 1.0) / 2.0
-    V_floor = prep_model(V_floor, 1.25)
-    V_floor *= 1.5
+    V_bunny = prep_model(V_bunny, 1.0)
+    V_floor = prep_model(V_floor, 1.0)
 
-    # Put floor lower first (so it is clearly "below")
-    V_floor[:, 1] -= 1.2
+    bunny = Model(V_bunny, Vi_bunny, "bunny")
+    floor = Model(V_floor, Vi_floor, "floor")
 
-    # Put bunny on top of floor
-    gap = 0.02
-    V_bunny[:, 1] += (V_floor[:, 1].max() - V_bunny[:, 1].min()) + gap
+    floor.scl[:] = [1.5, 0.10, 1.5]
+    floor.pos[:] = [0.0, -1.2, 0.0]
+
+    bunny.scl[:] = [0.5, 0.5, 0.5]
+    bunny.pos[:] = [0.0, -0.2, 0.0]
+
+    floor_top_y = (V_floor[:, 1] * floor.scl[1] + floor.pos[1]).max()
+    bunny_bottom_y = (V_bunny[:, 1] * bunny.scl[1] + bunny.pos[1]).min()
+    bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
+
+
+    # Translate bunny xyz
+    # bunny.pos += np.array([0.0, 0.0, 0.0])
+
+    # Rotate bunny around Y by 90 degrees 0=X 1=Y 2=Z
+    # bunny.rot[1] += np.pi / 2
+
+    # Uniform scale bunny by 1.5x
+    # bunny.scl *= 3
 
     vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
     proj = perspective(60, width / height, 0.1, 100.0)
 
-    # Orbit around bunny
-    center = V_bunny.mean(axis=0).copy()
+    center = bunny.pos.copy()
 
-    # Choose a stable radius based on bunny size only
     bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
-    bunny_r = float(np.linalg.norm(bunny_size))
+    bunny_r = float(np.linalg.norm(bunny_size * bunny.scl))
 
-    # Good default view: above the floor, looking down at bunny
     yaw = 2.2
     pitch = 0.55
     radius = max(2.2, bunny_r * 3.1)
@@ -226,7 +348,6 @@ if __name__ == "__main__":
         image[:] = 0
         zbuffer[:] = 1e18
 
-        # Camera position
         eye = center + np.array([
             radius * np.cos(pitch) * np.cos(yaw),
             radius * np.sin(pitch),
@@ -235,8 +356,8 @@ if __name__ == "__main__":
 
         view = lookat(eye, center, up)
 
-        render_model(V_floor, Vi_floor, view, proj, vp_mat, light)
-        render_model(V_bunny, Vi_bunny, view, proj, vp_mat, light)
+        render_model(floor, view, proj, vp_mat, light)
+        render_model(bunny, view, proj, vp_mat, light)
 
         frame = image[::-1, :, :][:, :, [2, 1, 0, 3]]
         cv2.imshow("Framebuffer", frame)
@@ -261,7 +382,6 @@ if __name__ == "__main__":
         elif key == 27:
             break
 
-        # Keep camera above the floor-ish (prevents going underneath)
         pitch = max(0.10, min(1.20, pitch))
 
         if cv2.getWindowProperty("Framebuffer", cv2.WND_PROP_VISIBLE) < 1:
