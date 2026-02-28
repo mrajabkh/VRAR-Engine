@@ -138,6 +138,11 @@ def viewport(x, y, w, h, d):
     ], dtype=float)
 
 
+################################
+# Problem 1 (Rendering):
+# Transformation matrices: translation, rotation (X/Y/Z), scaling
+################################
+
 def prep_model(V, scale=1.25):
     vmin, vmax = V.min(), V.max()
     V = (2 * (V - vmin) / (vmax - vmin) - 1) * scale
@@ -146,9 +151,6 @@ def prep_model(V, scale=1.25):
     return V
 
 
-# -----------------------------
-# Transformation matrices (Part 3)
-# -----------------------------
 def mat_translate(tx, ty, tz):
     M = np.eye(4, dtype=float)
     M[0, 3] = tx
@@ -193,37 +195,6 @@ def mat_rot_z(a):
     M[1, 0] = s
     M[1, 1] = c
     return M
-
-
-def load_imu_csv(path):
-    """
-    Loads the IMU CSV dataset and converts gyroscope
-    readings from deg/s to rad/s.
-
-    Returns:
-        t        : (N,) time in seconds
-        gyro_rad : (N,3) angular velocity in rad/s
-        accel    : (N,3) acceleration in m/s^2
-        mag      : (N,3) magnetometer in Gauss
-    """
-
-    data = np.genfromtxt(
-        path,
-        delimiter=",",
-        skip_header=1
-    )
-
-    # Columns based on your layout
-    t = data[:, 0]
-
-    gyro_deg = data[:, 1:4]
-    accel = data[:, 4:7]
-    mag = data[:, 7:10]
-
-    # Convert deg/s → rad/s
-    gyro_rad = np.deg2rad(gyro_deg)
-
-    return t, gyro_rad, accel, mag
 
 
 class Model:
@@ -275,6 +246,126 @@ def render_model(model, view, proj, vp_mat, light):
     for i in np.argwhere(I >= 0)[:, 0]:
         triangle(T[i], Vs_tri[i][0], Vs_tri[i][1], Vs_tri[i][2], I[i])
 
+################################
+# Problem 2 (Tracking):
+# Quaternion format: [w, x, y, z]
+# rotX = roll rotY = pitch rotZ = yaw
+################################
+
+def load_imu_csv(path):
+    """
+    Loads the IMU CSV dataset and converts gyroscope
+    readings from deg/s to rad/s.
+
+    Returns:
+        t        : (N,) time in seconds
+        gyro_rad : (N,3) angular velocity in rad/s
+        accel    : (N,3) acceleration in m/s^2
+        mag      : (N,3) magnetometer in Gauss
+    """
+
+    data = np.genfromtxt(
+        path,
+        delimiter=",",
+        skip_header=1
+    )
+
+    # Columns based on your layout
+    t = data[:, 0]
+
+    gyro_deg = data[:, 1:4]
+    accel = data[:, 4:7]
+    mag = data[:, 7:10]
+
+    # Convert deg/s → rad/s
+    gyro_rad = np.deg2rad(gyro_deg)
+
+    return t, gyro_rad, accel, mag
+
+
+def quat_normalize(q):
+    q = np.asarray(q, dtype=float)
+    n = np.linalg.norm(q)
+    if n == 0:
+        return q
+    return q / n
+
+
+def euler_to_quat(rotX, rotY, rotZ):
+    """
+    Euler angles (radians) -> quaternion [w, x, y, z]
+    Convention: ZYX (rotZ Z, rotY Y, rotX X)
+    """
+    cr = np.cos(rotX * 0.5)
+    sr = np.sin(rotX * 0.5)
+    cp = np.cos(rotY * 0.5)
+    sp = np.sin(rotY * 0.5)
+    cy = np.cos(rotZ * 0.5)
+    sy = np.sin(rotZ * 0.5)
+
+    w = cy * cp * cr + sy * sp * sr
+    x = cy * cp * sr - sy * sp * cr
+    y = cy * sp * cr + sy * cp * sr
+    z = sy * cp * cr - cy * sp * sr
+
+    return quat_normalize(np.array([w, x, y, z], dtype=float))
+
+
+def quat_to_euler(q):
+    """
+    Quaternion [w, x, y, z] -> Euler angles (rotX, rotY, rotZ) in radians
+    Convention: ZYX
+    """
+    q = quat_normalize(q)
+    w, x, y, z = q
+
+    # rotX (X)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    rotX = np.arctan2(sinr_cosp, cosr_cosp)
+
+    # rotY (Y)
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    rotY = np.arcsin(sinp)
+
+    # rotZ (Z)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    rotZ = np.arctan2(siny_cosp, cosy_cosp)
+
+    return rotX, rotY, rotZ
+
+
+def quat_conjugate(q):
+    """
+    Conjugate of quaternion [w, x, y, z]
+    For unit quaternions, this is the inverse rotation.
+    """
+    q = np.asarray(q, dtype=float)
+    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
+
+
+def quat_multiply(a, b):
+    """
+    Hamilton product: a ⊗ b
+    Note: multiplication is not commutative.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+
+    w = aw * bw - ax * bx - ay * by - az * bz
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by - ax * bz + ay * bw + az * bx
+    z = aw * bz + ax * by - ay * bx + az * bw
+
+    return np.array([w, x, y, z], dtype=float)
+
+################################
+# MAIN
+################################
 
 if __name__ == "__main__":
 
@@ -332,15 +423,20 @@ if __name__ == "__main__":
     bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
     bunny_r = float(np.linalg.norm(bunny_size * bunny.scl))
 
-    yaw = 2.2
-    pitch = 0.55
+    rotZ = 2.2
+    rotY = 0.55
     radius = max(2.2, bunny_r * 3.1)
 
-    step_yaw = 0.12
-    step_pitch = 0.08
+    step_rotZ = 0.12
+    step_rotY = 0.08
     step_zoom = 0.35
 
     cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
+
+    q = euler_to_quat(0.0, 0.0, np.pi/2)
+    print("q:", q)
+    print("back to euler:", quat_to_euler(q))
+    print("q * q_conj:", quat_multiply(q, quat_conjugate(q)))
 
     while True:
         start = time.time()
@@ -349,9 +445,9 @@ if __name__ == "__main__":
         zbuffer[:] = 1e18
 
         eye = center + np.array([
-            radius * np.cos(pitch) * np.cos(yaw),
-            radius * np.sin(pitch),
-            radius * np.cos(pitch) * np.sin(yaw),
+            radius * np.cos(rotY) * np.cos(rotZ),
+            radius * np.sin(rotY),
+            radius * np.cos(rotY) * np.sin(rotZ),
         ], dtype=float)
 
         view = lookat(eye, center, up)
@@ -368,13 +464,13 @@ if __name__ == "__main__":
         key = cv2.waitKey(30) & 0xFF
 
         if key == ord("a"):
-            yaw -= step_yaw
+            rotZ -= step_rotZ
         elif key == ord("d"):
-            yaw += step_yaw
+            rotZ += step_rotZ
         elif key == ord("w"):
-            pitch += step_pitch
+            rotY += step_rotY
         elif key == ord("s"):
-            pitch -= step_pitch
+            rotY -= step_rotY
         elif key == ord("q"):
             radius = max(1.0, radius - step_zoom)
         elif key == ord("e"):
@@ -382,7 +478,7 @@ if __name__ == "__main__":
         elif key == 27:
             break
 
-        pitch = max(0.10, min(1.20, pitch))
+        rotY = max(0.10, min(1.20, rotY))
 
         if cv2.getWindowProperty("Framebuffer", cv2.WND_PROP_VISIBLE) < 1:
             break
