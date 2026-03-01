@@ -143,6 +143,56 @@ def viewport(x, y, w, h, d):
 # Transformation matrices: translation, rotation (X/Y/Z), scaling
 ################################
 
+class Model:
+    def __init__(self, V, Vi, name=""):
+        self.name = name
+        self.V = V
+        self.Vi = Vi
+        self.pos = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.rot = np.array([0.0, 0.0, 0.0], dtype=float)   # radians: rx, ry, rz
+        self.scl = np.array([1.0, 1.0, 1.0], dtype=float)
+
+    def model_matrix(self):
+        T = mat_translate(self.pos[0], self.pos[1], self.pos[2])
+        Rx = mat_rot_x(self.rot[0])
+        Ry = mat_rot_y(self.rot[1])
+        Rz = mat_rot_z(self.rot[2])
+        S = mat_scale(self.scl[0], self.scl[1], self.scl[2])
+        return T @ Rz @ Ry @ Rx @ S
+
+
+def render_model(model, view, proj, vp_mat, light):
+    V = model.V
+    Vi = model.Vi
+
+    Vh = np.c_[V, np.ones(len(V))]
+    V_world_h = Vh @ model.model_matrix().T
+
+    V_cam_h = V_world_h @ view.T
+    V_cam = V_cam_h[:, :3]
+
+    clip = V_cam_h @ proj.T
+    ndc = clip[:, :3] / clip[:, 3:4]
+
+    ndc_h = np.c_[ndc, np.ones(len(ndc))]
+    Vs = (ndc_h @ vp_mat.T)[:, :3]
+
+    V_tri = V_cam[Vi]
+    Vs_tri = Vs[Vi]
+
+    T = np.transpose(Vs_tri, axes=[0, 2, 1]).copy()
+    T[:, 2, :] = 1
+    T = np.linalg.inv(T)
+
+    N = np.cross(V_tri[:, 2] - V_tri[:, 0], V_tri[:, 1] - V_tri[:, 0])
+    N = N / np.linalg.norm(N, axis=1).reshape(len(N), 1)
+
+    I = np.dot(N, light) * 255
+
+    for i in np.argwhere(I >= 0)[:, 0]:
+        triangle(T[i], Vs_tri[i][0], Vs_tri[i][1], Vs_tri[i][2], I[i])
+
+
 def prep_model(V, scale=1.25):
     vmin, vmax = V.min(), V.max()
     V = (2 * (V - vmin) / (vmax - vmin) - 1) * scale
@@ -196,58 +246,8 @@ def mat_rot_z(a):
     M[1, 1] = c
     return M
 
-
-class Model:
-    def __init__(self, V, Vi, name=""):
-        self.name = name
-        self.V = V
-        self.Vi = Vi
-        self.pos = np.array([0.0, 0.0, 0.0], dtype=float)
-        self.rot = np.array([0.0, 0.0, 0.0], dtype=float)   # radians: rx, ry, rz
-        self.scl = np.array([1.0, 1.0, 1.0], dtype=float)
-
-    def model_matrix(self):
-        T = mat_translate(self.pos[0], self.pos[1], self.pos[2])
-        Rx = mat_rot_x(self.rot[0])
-        Ry = mat_rot_y(self.rot[1])
-        Rz = mat_rot_z(self.rot[2])
-        S = mat_scale(self.scl[0], self.scl[1], self.scl[2])
-        return T @ Rz @ Ry @ Rx @ S
-
-
-def render_model(model, view, proj, vp_mat, light):
-    V = model.V
-    Vi = model.Vi
-
-    Vh = np.c_[V, np.ones(len(V))]
-    V_world_h = Vh @ model.model_matrix().T
-
-    V_cam_h = V_world_h @ view.T
-    V_cam = V_cam_h[:, :3]
-
-    clip = V_cam_h @ proj.T
-    ndc = clip[:, :3] / clip[:, 3:4]
-
-    ndc_h = np.c_[ndc, np.ones(len(ndc))]
-    Vs = (ndc_h @ vp_mat.T)[:, :3]
-
-    V_tri = V_cam[Vi]
-    Vs_tri = Vs[Vi]
-
-    T = np.transpose(Vs_tri, axes=[0, 2, 1]).copy()
-    T[:, 2, :] = 1
-    T = np.linalg.inv(T)
-
-    N = np.cross(V_tri[:, 2] - V_tri[:, 0], V_tri[:, 1] - V_tri[:, 0])
-    N = N / np.linalg.norm(N, axis=1).reshape(len(N), 1)
-
-    I = np.dot(N, light) * 255
-
-    for i in np.argwhere(I >= 0)[:, 0]:
-        triangle(T[i], Vs_tri[i][0], Vs_tri[i][1], Vs_tri[i][2], I[i])
-
 ################################
-# Problem 2 (Tracking):
+# Problem 2 (Tracking, Handling POSE Data):
 # Quaternion format: [w, x, y, z]
 # rotX = roll rotY = pitch rotZ = yaw
 ################################
@@ -364,17 +364,68 @@ def quat_multiply(a, b):
     return np.array([w, x, y, z], dtype=float)
 
 ################################
+# Problem 3 (Tracking, POSE Calculation):
+################################
+
+def axis_angle_to_quat(axis, angle):
+    """
+    axis: (3,) unit vector
+    angle: radians
+    returns quaternion [w,x,y,z]
+    """
+    axis = np.asarray(axis, dtype=float)
+    n = np.linalg.norm(axis)
+    if n == 0.0:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    axis = axis / n
+    half = 0.5 * angle
+    s = np.sin(half) # change to angle * 0.5
+    return quat_normalize(np.array([np.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float))
+
+
+def delta_quat_from_gyro(omega_rad_s, dt):
+    """
+    omega_rad_s: (3,) angular velocity in rad/s
+    dt: seconds
+    returns delta quaternion for this timestep
+    """
+    omega = np.asarray(omega_rad_s, dtype=float)
+    omega_mag = float(np.linalg.norm(omega))
+    if omega_mag < 1e-12 or dt <= 0.0:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    axis = omega / omega_mag
+    angle = omega_mag * dt
+    return axis_angle_to_quat(axis, angle)
+
+
+def integrate_gyro_dead_reckoning(t, gyro_rad):
+    """
+    Dead reckoning using only gyroscope.
+    q[0] = identity [1,0,0,0]
+    q[k+1] = q[k] ⊗ dq
+    Returns Q: (N,4)
+    """
+    t = np.asarray(t, dtype=float)
+    gyro_rad = np.asarray(gyro_rad, dtype=float)
+
+    N = len(t)
+    Q = np.zeros((N, 4), dtype=float)
+    Q[0] = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    for k in range(N - 1):
+        dt = float(t[k + 1] - t[k])
+        dq = delta_quat_from_gyro(gyro_rad[k], dt)
+        Q[k + 1] = quat_normalize(quat_multiply(Q[k], dq))
+
+    return Q
+
+################################
 # MAIN
 ################################
 
 if __name__ == "__main__":
-
-    t, gyro, accel, mag = load_imu_csv("IMUData.csv")
-
-    print("Number of samples:", len(t))
-    print("Gyro shape:", gyro.shape)
-    print("Accel shape:", accel.shape)
-    print("Mag shape:", mag.shape)
 
     width, height = 1200, 1200
 
@@ -413,7 +464,7 @@ if __name__ == "__main__":
     # bunny.rot[1] += np.pi / 2
 
     # Uniform scale bunny by 1.5x
-    # bunny.scl *= 3
+    # bunny.scl *= 1.5
 
     vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
     proj = perspective(60, width / height, 0.1, 100.0)
@@ -433,10 +484,54 @@ if __name__ == "__main__":
 
     cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
 
-    q = euler_to_quat(0.0, 0.0, np.pi/2)
-    print("q:", q)
-    print("back to euler:", quat_to_euler(q))
-    print("q * q_conj:", quat_multiply(q, quat_conjugate(q)))
+    #TESTING
+    
+    # t, gyro, accel, mag = load_imu_csv("IMUData.csv")
+
+    # print("Number of samples:", len(t))
+    # print("Gyro shape:", gyro.shape)
+    # print("Accel shape:", accel.shape)
+    # print("Mag shape:", mag.shape)
+
+    # Q = integrate_gyro_dead_reckoning(t, gyro)
+    # print("\n================ GYRO DEAD RECKONING CHECK ================\n")
+
+    # # 1) Basic shape + endpoints
+    # print("Q shape:", Q.shape)
+    # print("First quaternion:", Q[0])
+    # print("Last quaternion:", Q[-1])
+
+    # # 2) Norm check (should stay ~1)
+    # q_norms = np.linalg.norm(Q, axis=1)
+    # print("\nQuaternion norm min:", float(q_norms.min()))
+    # print("Quaternion norm max:", float(q_norms.max()))
+
+    # # 3) NaN / Inf safety check
+    # print("\nAny NaNs in Q:", np.isnan(Q).any())
+    # print("Any Infs in Q:", np.isinf(Q).any())
+
+    # # 4) First few Euler angles
+    # print("\nFirst 5 Euler angles (deg):")
+    # for i in range(5):
+    #     r, p, y = quat_to_euler(Q[i])
+    #     print(i, np.rad2deg([r, p, y]))
+
+    # # 5) Final Euler orientation
+    # r, p, y = quat_to_euler(Q[-1])
+    # print("\nFinal Euler angles (deg):", np.rad2deg([r, p, y]))
+
+    # # 6) Gyro magnitude sanity check
+    # omega_mag = np.linalg.norm(gyro, axis=1)
+    # print("\nGyro magnitude min/max (rad/s):",
+    #   float(omega_mag.min()),
+    #   float(omega_mag.max()))
+
+    # print("\n============================================================\n")
+
+    # q = euler_to_quat(0.0, 0.0, np.pi/2)
+    # print("q:", q)
+    # print("back to euler:", quat_to_euler(q))
+    # print("q * q_conj:", quat_multiply(q, quat_conjugate(q)))
 
     while True:
         start = time.time()
