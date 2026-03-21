@@ -85,18 +85,25 @@ def line(A, B):
 
 def obj_load(filename):
     V, Vi = [], []
+
     with open(filename) as f:
-        for line in f.readlines():
+        for line in f:
             if line.startswith('#'):
                 continue
+
             values = line.split()
             if not values:
                 continue
+
             if values[0] == 'v':
                 V.append([float(x) for x in values[1:4]])
+
             elif values[0] == 'f':
-                Vi.append([int(x) for x in values[1:4]])
-    return np.array(V), np.array(Vi) - 1
+                face = [int(tok.split('/')[0]) - 1 for tok in values[1:]]
+                for i in range(1, len(face) - 1):
+                    Vi.append([face[0], face[i], face[i + 1]])
+
+    return np.array(V, dtype=float), np.array(Vi, dtype=int)
 
 
 def lookat(eye, center, up):
@@ -246,6 +253,7 @@ def mat_rot_z(a):
     M[1, 1] = c
     return M
 
+
 ################################
 # Problem 2 (Tracking, Handling POSE Data):
 # Quaternion format: [w, x, y, z]
@@ -270,14 +278,11 @@ def load_imu_csv(path):
         skip_header=1
     )
 
-    # Columns based on your layout
     t = data[:, 0]
-
     gyro_deg = data[:, 1:4]
     accel = data[:, 4:7]
     mag = data[:, 7:10]
 
-    # Convert deg/s → rad/s
     gyro_rad = np.deg2rad(gyro_deg)
 
     return t, gyro_rad, accel, mag
@@ -319,17 +324,14 @@ def quat_to_euler(q):
     q = quat_normalize(q)
     w, x, y, z = q
 
-    # rotX (X)
     sinr_cosp = 2.0 * (w * x + y * z)
     cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
     rotX = np.arctan2(sinr_cosp, cosr_cosp)
 
-    # rotY (Y)
     sinp = 2.0 * (w * y - z * x)
     sinp = np.clip(sinp, -1.0, 1.0)
     rotY = np.arcsin(sinp)
 
-    # rotZ (Z)
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     rotZ = np.arctan2(siny_cosp, cosy_cosp)
@@ -338,19 +340,11 @@ def quat_to_euler(q):
 
 
 def quat_conjugate(q):
-    """
-    Conjugate of quaternion [w, x, y, z]
-    For unit quaternions, this is the inverse rotation.
-    """
     q = np.asarray(q, dtype=float)
     return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
 
 
 def quat_multiply(a, b):
-    """
-    Hamilton product: a ⊗ b
-    Note: multiplication is not commutative.
-    """
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     aw, ax, ay, az = a
@@ -363,16 +357,12 @@ def quat_multiply(a, b):
 
     return np.array([w, x, y, z], dtype=float)
 
+
 ################################
 # Problem 3 (Tracking, POSE Calculation):
 ################################
 
 def axis_angle_to_quat(axis, angle):
-    """
-    axis: (3,) unit vector
-    angle: radians
-    returns quaternion [w,x,y,z]
-    """
     axis = np.asarray(axis, dtype=float)
     n = np.linalg.norm(axis)
     if n == 0.0:
@@ -380,16 +370,11 @@ def axis_angle_to_quat(axis, angle):
 
     axis = axis / n
     half = 0.5 * angle
-    s = np.sin(half) # change to angle * 0.5
+    s = np.sin(half)
     return quat_normalize(np.array([np.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float))
 
 
 def delta_quat_from_gyro(omega_rad_s, dt):
-    """
-    omega_rad_s: (3,) angular velocity in rad/s
-    dt: seconds
-    returns delta quaternion for this timestep
-    """
     omega = np.asarray(omega_rad_s, dtype=float)
     omega_mag = float(np.linalg.norm(omega))
     if omega_mag < 1e-12 or dt <= 0.0:
@@ -401,12 +386,6 @@ def delta_quat_from_gyro(omega_rad_s, dt):
 
 
 def integrate_gyro_dead_reckoning(t, gyro_rad):
-    """
-    Dead reckoning using only gyroscope.
-    q[0] = identity [1,0,0,0]
-    q[k+1] = q[k] ⊗ dq
-    Returns Q: (N,4)
-    """
     t = np.asarray(t, dtype=float)
     gyro_rad = np.asarray(gyro_rad, dtype=float)
 
@@ -420,6 +399,79 @@ def integrate_gyro_dead_reckoning(t, gyro_rad):
         Q[k + 1] = quat_normalize(quat_multiply(Q[k], dq))
 
     return Q
+
+
+def quat_rotate_vector(q, v):
+    q = quat_normalize(q)
+    vq = np.array([0.0, v[0], v[1], v[2]], dtype=float)
+    qr = quat_multiply(quat_multiply(q, vq), quat_conjugate(q))
+    return qr[1:]
+
+
+def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha=0.98, up_global=np.array([0.0, 1.0, 0.0]), accel_sign=1.0):
+    t = np.asarray(t, dtype=float)
+    gyro_rad = np.asarray(gyro_rad, dtype=float)
+    accel = np.asarray(accel, dtype=float)
+
+    up_global = np.asarray(up_global, dtype=float)
+    up_global = up_global / np.linalg.norm(up_global)
+
+    N = len(t)
+    Q = np.zeros((N, 4), dtype=float)
+    Q[0] = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    for k in range(N - 1):
+        dt = float(t[k + 1] - t[k])
+
+        dq = delta_quat_from_gyro(gyro_rad[k], dt)
+        q_gyro = quat_normalize(quat_multiply(Q[k], dq))
+
+        a_body = accel[k]
+        a_norm = np.linalg.norm(a_body)
+
+        if a_norm < 1e-12:
+            Q[k + 1] = q_gyro
+            continue
+
+        a_body = a_body / a_norm
+
+        a_global = accel_sign * quat_rotate_vector(q_gyro, a_body)
+        a_global_norm = np.linalg.norm(a_global)
+
+        if a_global_norm < 1e-12:
+            Q[k + 1] = q_gyro
+            continue
+
+        a_global = a_global / a_global_norm
+
+        tilt_axis = np.cross(a_global, up_global)
+        #tilt_axis = np.cross(up_global, a_global)
+        axis_norm = np.linalg.norm(tilt_axis)
+
+        dot_val = np.clip(np.dot(a_global, up_global), -1.0, 1.0)
+        phi = np.arccos(dot_val)
+
+        if axis_norm < 1e-12 or phi < 1e-12:
+            Q[k + 1] = q_gyro
+            continue
+
+        tilt_axis = tilt_axis / axis_norm
+
+        # correction_angle = (1.0 - alpha) * phi
+        
+        # warmup = min(1.0, k / 100.0)
+        # correction_angle = warmup * (1.0 - alpha) * phi
+
+        warmup_time = 1.0  # seconds (you can tweak this to 0.5–1.5)
+        elapsed_time = t[k] - t[0]
+        warmup = min(1.0, elapsed_time / warmup_time)
+        correction_angle = warmup * (1.0 - alpha) * phi 
+
+        q_corr = axis_angle_to_quat(tilt_axis, correction_angle)
+        Q[k + 1] = quat_normalize(quat_multiply(q_corr, q_gyro))
+
+    return Q
+
 
 ################################
 # MAIN
@@ -456,16 +508,6 @@ if __name__ == "__main__":
     bunny_bottom_y = (V_bunny[:, 1] * bunny.scl[1] + bunny.pos[1]).min()
     bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
 
-
-    # Translate bunny xyz
-    # bunny.pos += np.array([0.0, 0.0, 0.0])
-
-    # Rotate bunny around Y by 90 degrees 0=X 1=Y 2=Z
-    # bunny.rot[1] += np.pi / 2
-
-    # Uniform scale bunny by 1.5x
-    # bunny.scl *= 1.5
-
     vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
     proj = perspective(60, width / height, 0.1, 100.0)
 
@@ -474,9 +516,9 @@ if __name__ == "__main__":
     bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
     bunny_r = float(np.linalg.norm(bunny_size * bunny.scl))
 
-    rotZ = 2.2
+    rotZ = 1.0
     rotY = 0.55
-    radius = max(2.2, bunny_r * 3.1)
+    radius = max(1.5, bunny_r * 2.0)
 
     step_rotZ = 0.12
     step_rotY = 0.08
@@ -484,54 +526,66 @@ if __name__ == "__main__":
 
     cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
 
-    #TESTING
-    
-    # t, gyro, accel, mag = load_imu_csv("IMUData.csv")
+    # IMU data + fused orientation sequence
+    t, gyro, accel, mag = load_imu_csv(str(here / "IMUData.csv"))
+
+    Q_gyro = integrate_gyro_dead_reckoning(t, gyro)
+
+    Q_fused = integrate_gyro_accel_complementary(
+        t,
+        gyro,
+        accel,
+        alpha=0.98,
+        up_global=np.array([0.0, 1.0, 0.0]),
+        accel_sign=1.0
+    )
+
+    # Re-reference the motion so the first frame is the visual starting pose
+    # q_start_inv = quat_conjugate(Q_fused[0])
+    # Q_fused = np.array([quat_normalize(quat_multiply(q_start_inv, q)) for q in Q_fused])
+    # ####
+
+    # Timestamp-based playback
+    playback_start = time.time()
+    imu_t0 = float(t[0])
+    imu_duration = float(t[-1] - t[0])
+
+    # TESTING
 
     # print("Number of samples:", len(t))
     # print("Gyro shape:", gyro.shape)
     # print("Accel shape:", accel.shape)
     # print("Mag shape:", mag.shape)
 
-    # Q = integrate_gyro_dead_reckoning(t, gyro)
     # print("\n================ GYRO DEAD RECKONING CHECK ================\n")
-
-    # # 1) Basic shape + endpoints
-    # print("Q shape:", Q.shape)
-    # print("First quaternion:", Q[0])
-    # print("Last quaternion:", Q[-1])
-
-    # # 2) Norm check (should stay ~1)
-    # q_norms = np.linalg.norm(Q, axis=1)
+    # print("Q shape:", Q_gyro.shape)
+    # print("First quaternion:", Q_gyro[0])
+    # print("Last quaternion:", Q_gyro[-1])
+    # q_norms = np.linalg.norm(Q_gyro, axis=1)
     # print("\nQuaternion norm min:", float(q_norms.min()))
     # print("Quaternion norm max:", float(q_norms.max()))
-
-    # # 3) NaN / Inf safety check
-    # print("\nAny NaNs in Q:", np.isnan(Q).any())
-    # print("Any Infs in Q:", np.isinf(Q).any())
-
-    # # 4) First few Euler angles
+    # print("\nAny NaNs in Q:", np.isnan(Q_gyro).any())
+    # print("Any Infs in Q:", np.isinf(Q_gyro).any())
     # print("\nFirst 5 Euler angles (deg):")
     # for i in range(5):
-    #     r, p, y = quat_to_euler(Q[i])
+    #     r, p, y = quat_to_euler(Q_gyro[i])
     #     print(i, np.rad2deg([r, p, y]))
-
-    # # 5) Final Euler orientation
-    # r, p, y = quat_to_euler(Q[-1])
+    # r, p, y = quat_to_euler(Q_gyro[-1])
     # print("\nFinal Euler angles (deg):", np.rad2deg([r, p, y]))
-
-    # # 6) Gyro magnitude sanity check
     # omega_mag = np.linalg.norm(gyro, axis=1)
-    # print("\nGyro magnitude min/max (rad/s):",
-    #   float(omega_mag.min()),
-    #   float(omega_mag.max()))
-
+    # print("\nGyro magnitude min/max (rad/s):", float(omega_mag.min()), float(omega_mag.max()))
     # print("\n============================================================\n")
 
-    # q = euler_to_quat(0.0, 0.0, np.pi/2)
-    # print("q:", q)
-    # print("back to euler:", quat_to_euler(q))
-    # print("q * q_conj:", quat_multiply(q, quat_conjugate(q)))
+    # print("\n================ COMPLEMENTARY FILTER CHECK ================\n")
+    # print("Q_fused shape:", Q_fused.shape)
+    # print("First fused quaternion:", Q_fused[0])
+    # print("Last fused quaternion:", Q_fused[-1])
+    # qf_norms = np.linalg.norm(Q_fused, axis=1)
+    # print("Fused norm min:", float(qf_norms.min()))
+    # print("Fused norm max:", float(qf_norms.max()))
+    # rf, pf, yf = quat_to_euler(Q_fused[-1])
+    # print("Final fused Euler angles (deg):", np.rad2deg([rf, pf, yf]))
+    # print("\n===========================================================\n")
 
     while True:
         start = time.time()
@@ -547,7 +601,18 @@ if __name__ == "__main__":
 
         view = lookat(eye, center, up)
 
-        render_model(floor, view, proj, vp_mat, light)
+        # Use IMU timestamps for playback timing
+        elapsed = (time.time() - playback_start) % imu_duration
+        playback_t = imu_t0 + elapsed
+        frame_idx = np.searchsorted(t, playback_t, side="left")
+        frame_idx = min(frame_idx, len(Q_fused) - 1)
+
+        # Drive bunny from fused gyro + accelerometer orientation
+        roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused[frame_idx])
+        # roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_gyro[frame_idx])
+        bunny.rot[:] = [roll_bunny, pitch_bunny, yaw_bunny]
+
+        # render_model(floor, view, proj, vp_mat, light)
         render_model(bunny, view, proj, vp_mat, light)
 
         frame = image[::-1, :, :][:, :, [2, 1, 0, 3]]
