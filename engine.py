@@ -564,7 +564,7 @@ def integrate_gyro_accel_mag_complementary(
 # Problem 5 (Physics)
 ################################
 
-def update_physics(model, dt, rho=1.3, g=9.81):
+def update_physics(model, dt, floor_y, rho=1.3, g=9.81):
     vel = model.vel
     speed = np.linalg.norm(vel)
 
@@ -581,6 +581,11 @@ def update_physics(model, dt, rho=1.3, g=9.81):
 
     model.vel = model.vel + acc * dt
     model.pos = model.pos + model.vel * dt
+
+    # Fake floor collision
+    if model.pos[1] < floor_y:
+        model.pos[1] = floor_y
+        model.vel[1] = 0.0
 
 
 ################################
@@ -608,10 +613,10 @@ if __name__ == "__main__":
     floor = Model(V_floor, Vi_floor, "floor")
 
     bunny_fall_1 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_1")
-    #bunny_fall_2 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_2")
-    #bunny_fall_3 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_3")
+    # bunny_fall_2 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_2")
+    # bunny_fall_3 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_3")
 
-    falling_bunnies = [bunny_fall_1]#, bunny_fall_2, bunny_fall_3]
+    falling_bunnies = [bunny_fall_1]
 
     floor.scl[:] = [1.5, 0.10, 1.5]
     floor.pos[:] = [0.0, -1.2, 0.0]
@@ -624,17 +629,14 @@ if __name__ == "__main__":
     bunny_bottom_y = (V_bunny[:, 1] * bunny.scl[1] + bunny.pos[1]).min()
     bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
 
-    # Falling bunnies start above the original bunny
+    # Fake floor sits just below the main bunny
+    floor_y = bunny.pos[1] - 0.05
+
+    # Falling bunny starts above the original bunny
     start_y = bunny.pos[1] + 2.0
 
     bunny_fall_1.scl[:] = [0.5, 0.5, 0.5]
     bunny_fall_1.pos[:] = [-1.0, start_y + 1.5, -0.5]
-
-    # bunny_fall_2.scl[:] = [0.5, 0.5, 0.5]
-    # bunny_fall_2.pos[:] = [0.0, start_y + 2.5, 0.0]
-
-    # bunny_fall_3.scl[:] = [0.5, 0.5, 0.5]
-    # bunny_fall_3.pos[:] = [1.0, start_y + 3.5, 0.5]
 
     for b in falling_bunnies:
         b.vel[:] = [0.0, 0.0, 0.0]
@@ -698,9 +700,9 @@ if __name__ == "__main__":
         image[:] = 0
         zbuffer[:] = 1e18
 
-        # Problem 5.1 position update from gravity + drag
+        # Problem 5.1 position update from gravity + drag + fake floor
         for b in falling_bunnies:
-            update_physics(b, dt)
+            update_physics(b, dt, floor_y)
 
         center = bunny.pos.copy()
 
