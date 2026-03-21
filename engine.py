@@ -467,6 +467,111 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, acc
 # Problem 4 (Advanced Tracking, Mitigating Yaw Drift):
 ################################
 
+def project_to_plane(v, normal):
+    normal = normal / np.linalg.norm(normal)
+    return v - np.dot(v, normal) * normal
+
+def signed_angle(v1, v2, axis):
+    v1 = v1 / np.linalg.norm(v1)
+    v2 = v2 / np.linalg.norm(v2)
+    axis = axis / np.linalg.norm(axis)
+
+    cross = np.cross(v1, v2)
+    dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
+
+    angle = np.arccos(dot)
+
+    if np.dot(cross, axis) < 0:
+        angle = -angle
+
+    return angle
+
+def integrate_gyro_accel_mag_complementary(
+    t,
+    gyro_rad,
+    accel,
+    mag,
+    alpha_tilt=0.98,
+    alpha_yaw=0.995,
+    up_global=np.array([0.0, 0.0, 1.0]),
+    accel_sign=1.0
+):
+    t = np.asarray(t, dtype=float)
+    gyro_rad = np.asarray(gyro_rad, dtype=float)
+    accel = np.asarray(accel, dtype=float)
+    mag = np.asarray(mag, dtype=float)
+
+    up_global = np.asarray(up_global, dtype=float)
+    up_global = up_global / np.linalg.norm(up_global)
+
+    # Reference direction (initial magnetic heading)
+    mag0 = mag[0] / np.linalg.norm(mag[0])
+    ref_dir = project_to_plane(mag0, up_global)
+    ref_dir /= np.linalg.norm(ref_dir)
+
+    N = len(t)
+    Q = np.zeros((N, 4), dtype=float)
+    Q[0] = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    for k in range(N - 1):
+        dt = float(t[k + 1] - t[k])
+
+        # --- Gyro prediction ---
+        dq = delta_quat_from_gyro(gyro_rad[k], dt)
+        q_gyro = quat_normalize(quat_multiply(Q[k], dq))
+
+        # --- Tilt correction (same as Problem 3) ---
+        a = accel[k+1] #k+1 or k??
+        a_norm = np.linalg.norm(a)
+
+        if a_norm > 1e-12:
+            a_body = a / a_norm
+            a_global = accel_sign * quat_rotate_vector(q_gyro, a_body)
+            a_global /= np.linalg.norm(a_global)
+
+            tilt_axis = np.cross(a_global, up_global)
+            axis_norm = np.linalg.norm(tilt_axis)
+
+            dot_val = np.clip(np.dot(a_global, up_global), -1.0, 1.0)
+            phi = np.arccos(dot_val)
+
+            if axis_norm > 1e-12 and phi > 1e-12:
+                tilt_axis /= axis_norm
+                q_tilt = axis_angle_to_quat(tilt_axis, (1 - alpha_tilt) * phi)
+                q_tilted = quat_normalize(quat_multiply(q_tilt, q_gyro))
+            else:
+                q_tilted = q_gyro
+        else:
+            q_tilted = q_gyro
+
+        # --- Yaw correction (NEW) ---
+        m = mag[k+1] #k+1 or k??
+        m_norm = np.linalg.norm(m)
+
+        if m_norm > 1e-12:
+            m_body = m / m_norm
+            m_global = quat_rotate_vector(q_tilted, m_body)
+
+            m_proj = project_to_plane(m_global, up_global)
+            proj_norm = np.linalg.norm(m_proj)
+
+            if proj_norm > 1e-12:
+                m_proj /= proj_norm
+
+                yaw_error = signed_angle(m_proj, ref_dir, up_global)
+
+                q_yaw = axis_angle_to_quat(
+                    up_global,
+                    (1 - alpha_yaw) * yaw_error
+                )
+
+                Q[k + 1] = quat_normalize(quat_multiply(q_yaw, q_tilted))
+                continue
+
+        Q[k + 1] = q_tilted
+
+    return Q
+
 
 ################################
 # MAIN
@@ -535,52 +640,22 @@ if __name__ == "__main__":
         accel_sign=1.0
     )
 
-    # Re-reference the motion so the first frame is the visual starting pose
-    # q_start_inv = quat_conjugate(Q_fused[0])
-    # Q_fused = np.array([quat_normalize(quat_multiply(q_start_inv, q)) for q in Q_fused])
-    # ####
+    Q_fused_mag = integrate_gyro_accel_mag_complementary(
+        t,
+        gyro,
+        accel,
+        mag,
+        alpha_tilt=0.98,
+        alpha_yaw=0.995,
+        up_global=np.array([0.0, 0.0, 1.0]),
+        accel_sign=1.0
+    )
 
     # Timestamp-based playback
     playback_start = time.time()
     imu_t0 = float(t[0])
     imu_duration = float(t[-1] - t[0])
 
-    # TESTING
-
-    # print("Number of samples:", len(t))
-    # print("Gyro shape:", gyro.shape)
-    # print("Accel shape:", accel.shape)
-    # print("Mag shape:", mag.shape)
-
-    # print("\n================ GYRO DEAD RECKONING CHECK ================\n")
-    # print("Q shape:", Q_gyro.shape)
-    # print("First quaternion:", Q_gyro[0])
-    # print("Last quaternion:", Q_gyro[-1])
-    # q_norms = np.linalg.norm(Q_gyro, axis=1)
-    # print("\nQuaternion norm min:", float(q_norms.min()))
-    # print("Quaternion norm max:", float(q_norms.max()))
-    # print("\nAny NaNs in Q:", np.isnan(Q_gyro).any())
-    # print("Any Infs in Q:", np.isinf(Q_gyro).any())
-    # print("\nFirst 5 Euler angles (deg):")
-    # for i in range(5):
-    #     r, p, y = quat_to_euler(Q_gyro[i])
-    #     print(i, np.rad2deg([r, p, y]))
-    # r, p, y = quat_to_euler(Q_gyro[-1])
-    # print("\nFinal Euler angles (deg):", np.rad2deg([r, p, y]))
-    # omega_mag = np.linalg.norm(gyro, axis=1)
-    # print("\nGyro magnitude min/max (rad/s):", float(omega_mag.min()), float(omega_mag.max()))
-    # print("\n============================================================\n")
-
-    # print("\n================ COMPLEMENTARY FILTER CHECK ================\n")
-    # print("Q_fused shape:", Q_fused.shape)
-    # print("First fused quaternion:", Q_fused[0])
-    # print("Last fused quaternion:", Q_fused[-1])
-    # qf_norms = np.linalg.norm(Q_fused, axis=1)
-    # print("Fused norm min:", float(qf_norms.min()))
-    # print("Fused norm max:", float(qf_norms.max()))
-    # rf, pf, yf = quat_to_euler(Q_fused[-1])
-    # print("Final fused Euler angles (deg):", np.rad2deg([rf, pf, yf]))
-    # print("\n===========================================================\n")
 
     while True:
         start = time.time()
@@ -600,11 +675,13 @@ if __name__ == "__main__":
         elapsed = (time.time() - playback_start) % imu_duration
         playback_t = imu_t0 + elapsed
         frame_idx = np.searchsorted(t, playback_t, side="left")
-        frame_idx = min(frame_idx, len(Q_fused) - 1)
+        frame_idx = min(frame_idx, len(Q_fused_mag) - 1)
 
         # Drive bunny from fused gyro + accelerometer orientation
-        roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused[frame_idx])
         # roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_gyro[frame_idx])
+        # roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused[frame_idx])
+        roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused_mag[frame_idx])
+        
         bunny.rot[:] = [roll_bunny, pitch_bunny, yaw_bunny]
 
         # render_model(floor, view, proj, vp_mat, light)
