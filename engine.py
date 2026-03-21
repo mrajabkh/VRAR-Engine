@@ -408,7 +408,7 @@ def quat_rotate_vector(q, v):
     return qr[1:]
 
 
-def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha=0.98, up_global=np.array([0.0, 1.0, 0.0]), accel_sign=1.0):
+def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, accel_sign):
     t = np.asarray(t, dtype=float)
     gyro_rad = np.asarray(gyro_rad, dtype=float)
     accel = np.asarray(accel, dtype=float)
@@ -426,7 +426,7 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha=0.98, up_global
         dq = delta_quat_from_gyro(gyro_rad[k], dt)
         q_gyro = quat_normalize(quat_multiply(Q[k], dq))
 
-        a_body = accel[k]
+        a_body = accel[k+1] #k+1 or k??
         a_norm = np.linalg.norm(a_body)
 
         if a_norm < 1e-12:
@@ -445,7 +445,6 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha=0.98, up_global
         a_global = a_global / a_global_norm
 
         tilt_axis = np.cross(a_global, up_global)
-        #tilt_axis = np.cross(up_global, a_global)
         axis_norm = np.linalg.norm(tilt_axis)
 
         dot_val = np.clip(np.dot(a_global, up_global), -1.0, 1.0)
@@ -457,20 +456,16 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha=0.98, up_global
 
         tilt_axis = tilt_axis / axis_norm
 
-        # correction_angle = (1.0 - alpha) * phi
-        
-        # warmup = min(1.0, k / 100.0)
-        # correction_angle = warmup * (1.0 - alpha) * phi
-
-        warmup_time = 1.0  # seconds (you can tweak this to 0.5–1.5)
-        elapsed_time = t[k] - t[0]
-        warmup = min(1.0, elapsed_time / warmup_time)
-        correction_angle = warmup * (1.0 - alpha) * phi 
+        correction_angle = (1.0 - alpha) * phi
 
         q_corr = axis_angle_to_quat(tilt_axis, correction_angle)
         Q[k + 1] = quat_normalize(quat_multiply(q_corr, q_gyro))
 
     return Q
+
+################################
+# Problem 4 (Advanced Tracking, Mitigating Yaw Drift):
+################################
 
 
 ################################
@@ -536,7 +531,7 @@ if __name__ == "__main__":
         gyro,
         accel,
         alpha=0.98,
-        up_global=np.array([0.0, 1.0, 0.0]),
+        up_global=np.array([0.0, 0.0, 1.0]),
         accel_sign=1.0
     )
 
