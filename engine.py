@@ -21,13 +21,11 @@ def triangle(t, v0, v1, v2, intensity):
     X, Y = P[0, I], P[1, I]
     Z = v0[2] * B[0, I] + v1[2] * B[1, I] + v2[2] * B[2, I]
 
-    # Z-buffer (smaller Z = closer)
     I = np.argwhere(zbuffer[Y, X] > Z)[:, 0]
     X, Y, Z = X[I], Y[I], Z[I]
     zbuffer[Y, X] = Z
     image[Y, X] = intensity, intensity, intensity, 255
 
-    # Outline
     Pedge = []
     Pedge.extend(line(v0, v1))
     Pedge.extend(line(v1, v2))
@@ -146,8 +144,7 @@ def viewport(x, y, w, h, d):
 
 
 ################################
-# Problem 1 (Rendering):
-# Transformation matrices: translation, rotation (X/Y/Z), scaling
+# Problem 1 (Rendering)
 ################################
 
 class Model:
@@ -156,8 +153,14 @@ class Model:
         self.V = V
         self.Vi = Vi
         self.pos = np.array([0.0, 0.0, 0.0], dtype=float)
-        self.rot = np.array([0.0, 0.0, 0.0], dtype=float)   # radians: rx, ry, rz
+        self.rot = np.array([0.0, 0.0, 0.0], dtype=float)
         self.scl = np.array([1.0, 1.0, 1.0], dtype=float)
+
+        # Problem 5 physics properties
+        self.vel = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.mass = 1.0
+        self.Cd = 0.5
+        self.area = 0.2
 
     def model_matrix(self):
         T = mat_translate(self.pos[0], self.pos[1], self.pos[2])
@@ -255,23 +258,10 @@ def mat_rot_z(a):
 
 
 ################################
-# Problem 2 (Tracking, Handling POSE Data):
-# Quaternion format: [w, x, y, z]
-# rotX = roll rotY = pitch rotZ = yaw
+# Problem 2 (Tracking, Handling POSE Data)
 ################################
 
 def load_imu_csv(path):
-    """
-    Loads the IMU CSV dataset and converts gyroscope
-    readings from deg/s to rad/s.
-
-    Returns:
-        t        : (N,) time in seconds
-        gyro_rad : (N,3) angular velocity in rad/s
-        accel    : (N,3) acceleration in m/s^2
-        mag      : (N,3) magnetometer in Gauss
-    """
-
     data = np.genfromtxt(
         path,
         delimiter=",",
@@ -297,10 +287,6 @@ def quat_normalize(q):
 
 
 def euler_to_quat(rotX, rotY, rotZ):
-    """
-    Euler angles (radians) -> quaternion [w, x, y, z]
-    Convention: ZYX (rotZ Z, rotY Y, rotX X)
-    """
     cr = np.cos(rotX * 0.5)
     sr = np.sin(rotX * 0.5)
     cp = np.cos(rotY * 0.5)
@@ -317,10 +303,6 @@ def euler_to_quat(rotX, rotY, rotZ):
 
 
 def quat_to_euler(q):
-    """
-    Quaternion [w, x, y, z] -> Euler angles (rotX, rotY, rotZ) in radians
-    Convention: ZYX
-    """
     q = quat_normalize(q)
     w, x, y, z = q
 
@@ -359,7 +341,7 @@ def quat_multiply(a, b):
 
 
 ################################
-# Problem 3 (Tracking, POSE Calculation):
+# Problem 3 (Tracking, Pose Calculation)
 ################################
 
 def axis_angle_to_quat(axis, angle):
@@ -426,7 +408,7 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, acc
         dq = delta_quat_from_gyro(gyro_rad[k], dt)
         q_gyro = quat_normalize(quat_multiply(Q[k], dq))
 
-        a_body = accel[k+1] #k+1 or k??
+        a_body = accel[k + 1]
         a_norm = np.linalg.norm(a_body)
 
         if a_norm < 1e-12:
@@ -463,15 +445,23 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, acc
 
     return Q
 
+
 ################################
-# Problem 4 (Advanced Tracking, Mitigating Yaw Drift):
+# Problem 4 (Advanced Tracking, Mitigating Yaw Drift)
 ################################
 
 def project_to_plane(v, normal):
+    v = np.asarray(v, dtype=float)
+    normal = np.asarray(normal, dtype=float)
     normal = normal / np.linalg.norm(normal)
     return v - np.dot(v, normal) * normal
 
+
 def signed_angle(v1, v2, axis):
+    v1 = np.asarray(v1, dtype=float)
+    v2 = np.asarray(v2, dtype=float)
+    axis = np.asarray(axis, dtype=float)
+
     v1 = v1 / np.linalg.norm(v1)
     v2 = v2 / np.linalg.norm(v2)
     axis = axis / np.linalg.norm(axis)
@@ -485,6 +475,7 @@ def signed_angle(v1, v2, axis):
         angle = -angle
 
     return angle
+
 
 def integrate_gyro_accel_mag_complementary(
     t,
@@ -504,7 +495,6 @@ def integrate_gyro_accel_mag_complementary(
     up_global = np.asarray(up_global, dtype=float)
     up_global = up_global / np.linalg.norm(up_global)
 
-    # Reference direction (initial magnetic heading)
     mag0 = mag[0] / np.linalg.norm(mag[0])
     ref_dir = project_to_plane(mag0, up_global)
     ref_dir /= np.linalg.norm(ref_dir)
@@ -516,12 +506,10 @@ def integrate_gyro_accel_mag_complementary(
     for k in range(N - 1):
         dt = float(t[k + 1] - t[k])
 
-        # --- Gyro prediction ---
         dq = delta_quat_from_gyro(gyro_rad[k], dt)
         q_gyro = quat_normalize(quat_multiply(Q[k], dq))
 
-        # --- Tilt correction (same as Problem 3) ---
-        a = accel[k+1] #k+1 or k??
+        a = accel[k + 1]
         a_norm = np.linalg.norm(a)
 
         if a_norm > 1e-12:
@@ -544,8 +532,7 @@ def integrate_gyro_accel_mag_complementary(
         else:
             q_tilted = q_gyro
 
-        # --- Yaw correction (NEW) ---
-        m = mag[k+1] #k+1 or k??
+        m = mag[k + 1]
         m_norm = np.linalg.norm(m)
 
         if m_norm > 1e-12:
@@ -574,11 +561,33 @@ def integrate_gyro_accel_mag_complementary(
 
 
 ################################
+# Problem 5 (Physics)
+################################
+
+def update_physics(model, dt, rho=1.3, g=9.81):
+    vel = model.vel
+    speed = np.linalg.norm(vel)
+
+    F_gravity = model.mass * np.array([0.0, -g, 0.0], dtype=float)
+
+    if speed > 1e-12:
+        drag_mag = 0.5 * model.Cd * rho * model.area * speed * speed
+        F_drag = -drag_mag * (vel / speed)
+    else:
+        F_drag = np.zeros(3, dtype=float)
+
+    F_net = F_gravity + F_drag
+    acc = F_net / model.mass
+
+    model.vel = model.vel + acc * dt
+    model.pos = model.pos + model.vel * dt
+
+
+################################
 # MAIN
 ################################
 
 if __name__ == "__main__":
-
     width, height = 1200, 1200
 
     light = np.array([0, 0, -1], dtype=float)
@@ -595,18 +604,43 @@ if __name__ == "__main__":
     V_bunny = prep_model(V_bunny, 1.0)
     V_floor = prep_model(V_floor, 1.0)
 
-    bunny = Model(V_bunny, Vi_bunny, "bunny")
+    bunny = Model(V_bunny, Vi_bunny, "bunny_static")
     floor = Model(V_floor, Vi_floor, "floor")
+
+    bunny_fall_1 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_1")
+    #bunny_fall_2 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_2")
+    #bunny_fall_3 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_3")
+
+    falling_bunnies = [bunny_fall_1]#, bunny_fall_2, bunny_fall_3]
 
     floor.scl[:] = [1.5, 0.10, 1.5]
     floor.pos[:] = [0.0, -1.2, 0.0]
 
+    # Static IMU bunny
     bunny.scl[:] = [0.5, 0.5, 0.5]
     bunny.pos[:] = [0.0, -0.2, 0.0]
 
     floor_top_y = (V_floor[:, 1] * floor.scl[1] + floor.pos[1]).max()
     bunny_bottom_y = (V_bunny[:, 1] * bunny.scl[1] + bunny.pos[1]).min()
     bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
+
+    # Falling bunnies start above the original bunny
+    start_y = bunny.pos[1] + 2.0
+
+    bunny_fall_1.scl[:] = [0.5, 0.5, 0.5]
+    bunny_fall_1.pos[:] = [-1.0, start_y + 1.5, -0.5]
+
+    # bunny_fall_2.scl[:] = [0.5, 0.5, 0.5]
+    # bunny_fall_2.pos[:] = [0.0, start_y + 2.5, 0.0]
+
+    # bunny_fall_3.scl[:] = [0.5, 0.5, 0.5]
+    # bunny_fall_3.pos[:] = [1.0, start_y + 3.5, 0.5]
+
+    for b in falling_bunnies:
+        b.vel[:] = [0.0, 0.0, 0.0]
+        b.mass = 1.0
+        b.Cd = 0.5
+        b.area = 0.2
 
     vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
     proj = perspective(60, width / height, 0.1, 100.0)
@@ -626,7 +660,6 @@ if __name__ == "__main__":
 
     cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
 
-    # IMU data + fused orientation sequence
     t, gyro, accel, mag = load_imu_csv(str(here / "IMUData.csv"))
 
     Q_gyro = integrate_gyro_dead_reckoning(t, gyro)
@@ -651,17 +684,25 @@ if __name__ == "__main__":
         accel_sign=1.0
     )
 
-    # Timestamp-based playback
     playback_start = time.time()
     imu_t0 = float(t[0])
     imu_duration = float(t[-1] - t[0])
 
+    last_frame_time = time.time()
 
     while True:
-        start = time.time()
+        frame_start = time.time()
+        dt = min(frame_start - last_frame_time, 0.03)
+        last_frame_time = frame_start
 
         image[:] = 0
         zbuffer[:] = 1e18
+
+        # Problem 5.1 position update from gravity + drag
+        for b in falling_bunnies:
+            update_physics(b, dt)
+
+        center = bunny.pos.copy()
 
         eye = center + np.array([
             radius * np.cos(rotY) * np.cos(rotZ),
@@ -671,27 +712,25 @@ if __name__ == "__main__":
 
         view = lookat(eye, center, up)
 
-        # Use IMU timestamps for playback timing
         elapsed = (time.time() - playback_start) % imu_duration
         playback_t = imu_t0 + elapsed
         frame_idx = np.searchsorted(t, playback_t, side="left")
         frame_idx = min(frame_idx, len(Q_fused_mag) - 1)
 
-        # Drive bunny from fused gyro + accelerometer orientation
-        # roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_gyro[frame_idx])
-        # roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused[frame_idx])
         roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused_mag[frame_idx])
-        
         bunny.rot[:] = [roll_bunny, pitch_bunny, yaw_bunny]
 
         # render_model(floor, view, proj, vp_mat, light)
         render_model(bunny, view, proj, vp_mat, light)
 
+        for b in falling_bunnies:
+            render_model(b, view, proj, vp_mat, light)
+
         frame = image[::-1, :, :][:, :, [2, 1, 0, 3]]
         cv2.imshow("Framebuffer", frame)
 
-        end = time.time()
-        cv2.setWindowTitle("Framebuffer", "Framebuffer | Frame time: %.3fs" % (end - start))
+        frame_end = time.time()
+        cv2.setWindowTitle("Framebuffer", "Framebuffer | Frame time: %.3fs" % (frame_end - frame_start))
 
         key = cv2.waitKey(30) & 0xFF
 
