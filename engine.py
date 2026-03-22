@@ -1,7 +1,6 @@
 # Tiny 3D Renderer (with outlines) augmented with perspective projection
 import time
 from pathlib import Path
-
 import cv2
 import numpy as np
 
@@ -142,7 +141,6 @@ def viewport(x, y, w, h, d):
         [0, 0, 0, 1]
     ], dtype=float)
 
-
 ################################
 # Problem 1 (Rendering)
 ################################
@@ -156,11 +154,11 @@ class Model:
         self.rot = np.array([0.0, 0.0, 0.0], dtype=float)
         self.scl = np.array([1.0, 1.0, 1.0], dtype=float)
 
-        # Problem 5 physics properties
         self.vel = np.array([0.0, 0.0, 0.0], dtype=float)
         self.mass = 1.0
         self.Cd = 0.5
         self.area = 0.2
+        self.radius = 0.6
 
     def model_matrix(self):
         T = mat_translate(self.pos[0], self.pos[1], self.pos[2])
@@ -256,7 +254,6 @@ def mat_rot_z(a):
     M[1, 1] = c
     return M
 
-
 ################################
 # Problem 2 (Tracking, Handling POSE Data)
 ################################
@@ -338,7 +335,6 @@ def quat_multiply(a, b):
     z = aw * bz + ax * by - ay * bx + az * bw
 
     return np.array([w, x, y, z], dtype=float)
-
 
 ################################
 # Problem 3 (Tracking, Pose Calculation)
@@ -444,7 +440,6 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, acc
         Q[k + 1] = quat_normalize(quat_multiply(q_corr, q_gyro))
 
     return Q
-
 
 ################################
 # Problem 4 (Advanced Tracking, Mitigating Yaw Drift)
@@ -559,12 +554,11 @@ def integrate_gyro_accel_mag_complementary(
 
     return Q
 
-
 ################################
 # Problem 5 (Physics)
 ################################
 
-def update_physics(model, dt, floor_y, rho=1.3, g=9.81):
+def update_physics(model, dt, floor_y, rho=1.3, g=9.81, floor_friction_acc=22.0):
     vel = model.vel
     speed = np.linalg.norm(vel)
 
@@ -585,8 +579,49 @@ def update_physics(model, dt, floor_y, rho=1.3, g=9.81):
     # Fake floor collision
     if model.pos[1] < floor_y:
         model.pos[1] = floor_y
-        model.vel[1] = 0.0
 
+        if model.vel[1] < 0.0:
+            model.vel[1] = 0.0
+
+        # Apply simple horizontal floor friction (constant deceleration)
+        horiz_vel = np.array([model.vel[0], 0.0, model.vel[2]], dtype=float)
+        horiz_speed = np.linalg.norm(horiz_vel)
+
+        if horiz_speed > 1e-12:
+            friction_drop = floor_friction_acc * dt
+
+            if friction_drop >= horiz_speed:
+                model.vel[0] = 0.0
+                model.vel[2] = 0.0
+            else:
+                horiz_dir = horiz_vel / horiz_speed
+                new_horiz_vel = horiz_vel - horiz_dir * friction_drop
+                model.vel[0] = new_horiz_vel[0]
+                model.vel[2] = new_horiz_vel[2]
+
+
+def resolve_sphere_collision(dynamic_model, static_model, restitution):
+    delta = dynamic_model.pos - static_model.pos
+    dist = np.linalg.norm(delta)
+    min_dist = dynamic_model.radius + static_model.radius
+
+    if dist < 1e-12:
+        normal = np.array([1.0, 0.0, 0.0], dtype=float)
+        dist = 1e-12
+    else:
+        normal = delta / dist
+
+    if dist < min_dist:
+        penetration = min_dist - dist
+        dynamic_model.pos = dynamic_model.pos + normal * penetration
+
+        v_rel_n = np.dot(dynamic_model.vel, normal)
+        if v_rel_n < 0.0:
+            dynamic_model.vel = dynamic_model.vel - (1.0 + restitution) * v_rel_n * normal
+
+        return True
+
+    return False
 
 ################################
 # MAIN
@@ -613,15 +648,12 @@ if __name__ == "__main__":
     floor = Model(V_floor, Vi_floor, "floor")
 
     bunny_fall_1 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_1")
-    # bunny_fall_2 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_2")
-    # bunny_fall_3 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_3")
 
     falling_bunnies = [bunny_fall_1]
 
     floor.scl[:] = [1.5, 0.10, 1.5]
     floor.pos[:] = [0.0, -1.2, 0.0]
 
-    # Static IMU bunny
     bunny.scl[:] = [0.5, 0.5, 0.5]
     bunny.pos[:] = [0.0, -0.2, 0.0]
 
@@ -629,20 +661,24 @@ if __name__ == "__main__":
     bunny_bottom_y = (V_bunny[:, 1] * bunny.scl[1] + bunny.pos[1]).min()
     bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
 
-    # Fake floor sits just below the main bunny
-    floor_y = bunny.pos[1] - 0.05
+    floor_y = bunny.pos[1] - 0.02
 
-    # Falling bunny starts above the original bunny
     start_y = bunny.pos[1] + 2.0
 
     bunny_fall_1.scl[:] = [0.5, 0.5, 0.5]
-    bunny_fall_1.pos[:] = [-1.0, start_y + 1.5, -0.5]
+    bunny_fall_1.pos[:] = [0.2, start_y + 1.5, 0.0]
 
     for b in falling_bunnies:
         b.vel[:] = [0.0, 0.0, 0.0]
         b.mass = 1.0
         b.Cd = 0.5
         b.area = 0.2
+
+    base_bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
+    #base_bunny_radius = 0.5 * np.linalg.norm(base_bunny_size)
+
+    bunny.radius = bunny.radius * np.max(bunny.scl) * 1.7
+    bunny_fall_1.radius = bunny_fall_1.radius * np.max(bunny_fall_1.scl)
 
     vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
     proj = perspective(60, width / height, 0.1, 100.0)
@@ -654,7 +690,7 @@ if __name__ == "__main__":
 
     rotZ = 1.0
     rotY = 0.55
-    radius = max(1.5, bunny_r * 2.0)
+    radius = max(3, bunny_r * 1.5)
 
     step_rotZ = 0.12
     step_rotY = 0.08
@@ -700,9 +736,9 @@ if __name__ == "__main__":
         image[:] = 0
         zbuffer[:] = 1e18
 
-        # Problem 5.1 position update from gravity + drag + fake floor
         for b in falling_bunnies:
             update_physics(b, dt, floor_y)
+            resolve_sphere_collision(b, bunny, restitution=0.001)
 
         center = bunny.pos.copy()
 
@@ -722,7 +758,6 @@ if __name__ == "__main__":
         roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused_mag[frame_idx])
         bunny.rot[:] = [roll_bunny, pitch_bunny, yaw_bunny]
 
-        # render_model(floor, view, proj, vp_mat, light)
         render_model(bunny, view, proj, vp_mat, light)
 
         for b in falling_bunnies:
