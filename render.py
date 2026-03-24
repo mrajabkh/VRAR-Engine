@@ -141,6 +141,7 @@ def viewport(x, y, w, h, d):
         [0, 0, 0, 1]
     ], dtype=float)
 
+
 ################################
 # Problem 1 (Rendering)
 ################################
@@ -254,6 +255,7 @@ def mat_rot_z(a):
     M[1, 1] = c
     return M
 
+
 ################################
 # Problem 2 (Tracking, Handling POSE Data)
 ################################
@@ -335,6 +337,7 @@ def quat_multiply(a, b):
     z = aw * bz + ax * by - ay * bx + az * bw
 
     return np.array([w, x, y, z], dtype=float)
+
 
 ################################
 # Problem 3 (Tracking, Pose Calculation)
@@ -440,6 +443,7 @@ def integrate_gyro_accel_complementary(t, gyro_rad, accel, alpha, up_global, acc
         Q[k + 1] = quat_normalize(quat_multiply(q_corr, q_gyro))
 
     return Q
+
 
 ################################
 # Problem 4 (Advanced Tracking, Mitigating Yaw Drift)
@@ -554,6 +558,7 @@ def integrate_gyro_accel_mag_complementary(
 
     return Q
 
+
 ################################
 # Problem 5 (Physics)
 ################################
@@ -576,14 +581,12 @@ def update_physics(model, dt, floor_y, rho=1.3, g=9.81, floor_friction_acc=22.0)
     model.vel = model.vel + acc * dt
     model.pos = model.pos + model.vel * dt
 
-    # Fake floor collision
     if model.pos[1] < floor_y:
         model.pos[1] = floor_y
 
         if model.vel[1] < 0.0:
             model.vel[1] = 0.0
 
-        # Apply simple horizontal floor friction (constant deceleration)
         horiz_vel = np.array([model.vel[0], 0.0, model.vel[2]], dtype=float)
         horiz_speed = np.linalg.norm(horiz_vel)
 
@@ -623,30 +626,10 @@ def resolve_sphere_collision(dynamic_model, static_model, restitution):
 
     return False
 
-################################
-# MAIN
-################################
 
-if __name__ == "__main__":
-    width, height = 1200, 1200
-
-    light = np.array([0, 0, -1], dtype=float)
-    up = np.array([0, 1, 0], dtype=float)
-
-    image = np.zeros((height, width, 4), dtype=np.uint8)
-    zbuffer = 1e18 * np.ones((height, width), dtype=float)
-    coords = np.mgrid[0:width, 0:height].astype(int)
-
-    here = Path(__file__).resolve().parent
-    V_bunny, Vi_bunny = obj_load(str(here / "bunny.obj"))
-    V_floor, Vi_floor = obj_load(str(here / "floor.obj"))
-
-    V_bunny = prep_model(V_bunny, 1.0)
-    V_floor = prep_model(V_floor, 1.0)
-
-    bunny = Model(V_bunny, Vi_bunny, "bunny_static")
-    floor = Model(V_floor, Vi_floor, "floor")
-
+def create_scene(V_bunny, Vi_bunny, V_floor, Vi_floor):
+    bunny = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_static")
+    floor = Model(V_floor.copy(), Vi_floor.copy(), "floor")
     bunny_fall_1 = Model(V_bunny.copy(), Vi_bunny.copy(), "bunny_fall_1")
 
     falling_bunnies = [bunny_fall_1]
@@ -662,7 +645,6 @@ if __name__ == "__main__":
     bunny.pos[1] += (floor_top_y - bunny_bottom_y) + 0.02
 
     floor_y = bunny.pos[1] - 0.02
-
     start_y = bunny.pos[1] + 2.0
 
     bunny_fall_1.scl[:] = [0.5, 0.5, 0.5]
@@ -674,16 +656,16 @@ if __name__ == "__main__":
         b.Cd = 0.5
         b.area = 0.2
 
-    base_bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
-    #base_bunny_radius = 0.5 * np.linalg.norm(base_bunny_size)
-
     bunny.radius = bunny.radius * np.max(bunny.scl) * 1.7
     bunny_fall_1.radius = bunny_fall_1.radius * np.max(bunny_fall_1.scl)
 
-    vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
-    proj = perspective(60, width / height, 0.1, 100.0)
+    return bunny, floor, falling_bunnies, floor_y
 
-    center = bunny.pos.copy()
+
+def run_sequence(window_name, Q_sequence, t, V_bunny, Vi_bunny, V_floor, Vi_floor, proj, vp_mat, light, up):
+    global image, zbuffer
+
+    bunny, floor, falling_bunnies, floor_y = create_scene(V_bunny, Vi_bunny, V_floor, Vi_floor)
 
     bunny_size = np.max(V_bunny, axis=0) - np.min(V_bunny, axis=0)
     bunny_r = float(np.linalg.norm(bunny_size * bunny.scl))
@@ -696,31 +678,8 @@ if __name__ == "__main__":
     step_rotY = 0.08
     step_zoom = 0.35
 
-    cv2.namedWindow("Framebuffer", cv2.WINDOW_NORMAL)
-
-    t, gyro, accel, mag = load_imu_csv(str(here / "IMUData.csv"))
-
-    Q_gyro = integrate_gyro_dead_reckoning(t, gyro)
-
-    Q_fused = integrate_gyro_accel_complementary(
-        t,
-        gyro,
-        accel,
-        alpha=0.98,
-        up_global=np.array([0.0, 0.0, 1.0]),
-        accel_sign=1.0
-    )
-
-    Q_fused_mag = integrate_gyro_accel_mag_complementary(
-        t,
-        gyro,
-        accel,
-        mag,
-        alpha_tilt=0.98,
-        alpha_yaw=0.995,
-        up_global=np.array([0.0, 0.0, 1.0]),
-        accel_sign=1.0
-    )
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 800, 500)
 
     playback_start = time.time()
     imu_t0 = float(t[0])
@@ -753,21 +712,22 @@ if __name__ == "__main__":
         elapsed = (time.time() - playback_start) % imu_duration
         playback_t = imu_t0 + elapsed
         frame_idx = np.searchsorted(t, playback_t, side="left")
-        frame_idx = min(frame_idx, len(Q_fused_mag) - 1)
+        frame_idx = min(frame_idx, len(Q_sequence) - 1)
 
-        roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_fused_mag[frame_idx])
+        roll_bunny, pitch_bunny, yaw_bunny = quat_to_euler(Q_sequence[frame_idx])
         bunny.rot[:] = [roll_bunny, pitch_bunny, yaw_bunny]
 
+        render_model(floor, view, proj, vp_mat, light)
         render_model(bunny, view, proj, vp_mat, light)
 
         for b in falling_bunnies:
             render_model(b, view, proj, vp_mat, light)
 
         frame = image[::-1, :, :][:, :, [2, 1, 0, 3]]
-        cv2.imshow("Framebuffer", frame)
+        cv2.imshow(window_name, frame)
 
         frame_end = time.time()
-        cv2.setWindowTitle("Framebuffer", "Framebuffer | Frame time: %.3fs" % (frame_end - frame_start))
+        cv2.setWindowTitle(window_name, "%s | Frame time: %.3fs" % (window_name, frame_end - frame_start))
 
         key = cv2.waitKey(30) & 0xFF
 
@@ -788,7 +748,87 @@ if __name__ == "__main__":
 
         rotY = max(0.10, min(1.20, rotY))
 
-        if cv2.getWindowProperty("Framebuffer", cv2.WND_PROP_VISIBLE) < 1:
+        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
             break
+
+    try:
+        cv2.destroyWindow(window_name)
+    except cv2.error:
+        pass
+
+
+################################
+# MAIN
+################################
+
+if __name__ == "__main__":
+    width, height = 1200, 1200
+
+    light = np.array([0, 0, -1], dtype=float)
+    up = np.array([0, 1, 0], dtype=float)
+
+    image = np.zeros((height, width, 4), dtype=np.uint8)
+    zbuffer = 1e18 * np.ones((height, width), dtype=float)
+    coords = np.mgrid[0:width, 0:height].astype(int)
+
+    here = Path(__file__).resolve().parent
+    V_bunny, Vi_bunny = obj_load(str(here / "bunny.obj"))
+    V_floor, Vi_floor = obj_load(str(here / "floor.obj"))
+
+    V_bunny = prep_model(V_bunny, 1.0)
+    V_floor = prep_model(V_floor, 1.0)
+
+    vp_mat = viewport(32, 32, width - 64, height - 64, 1000)
+    proj = perspective(60, width / height, 0.1, 100.0)
+
+    t, gyro, accel, mag = load_imu_csv(str(here / "IMUData.csv"))
+
+    Q_fused = integrate_gyro_accel_complementary(
+        t,
+        gyro,
+        accel,
+        alpha=0.98,
+        up_global=np.array([0.0, 0.0, 1.0]),
+        accel_sign=1.0
+    )
+
+    Q_fused_mag = integrate_gyro_accel_mag_complementary(
+        t,
+        gyro,
+        accel,
+        mag,
+        alpha_tilt=0.98,
+        alpha_yaw=0.995,
+        up_global=np.array([0.0, 0.0, 1.0]),
+        accel_sign=1.0
+    )
+
+    run_sequence(
+        "Framebuffer - Gyro + Accel",
+        Q_fused,
+        t,
+        V_bunny,
+        Vi_bunny,
+        V_floor,
+        Vi_floor,
+        proj,
+        vp_mat,
+        light,
+        up
+    )
+
+    run_sequence(
+        "Framebuffer - Gyro + Accel + Mag",
+        Q_fused_mag,
+        t,
+        V_bunny,
+        Vi_bunny,
+        V_floor,
+        Vi_floor,
+        proj,
+        vp_mat,
+        light,
+        up
+    )
 
     cv2.destroyAllWindows()
